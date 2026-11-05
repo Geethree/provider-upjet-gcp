@@ -112,3 +112,60 @@ func TestReservationCreatePreservesSharing(t *testing.T) {
 		})
 	}
 }
+
+// TestReservationSharingBlockCountDiff checks that the real configurators retain
+// meaningful sharing changes while suppressing the empty computed count diff.
+func TestReservationSharingBlockCountDiff(t *testing.T) {
+	for scope, configure := range map[string]func(*config.Provider){
+		"cluster":    clustercompute.Configure,
+		"namespaced": namespacedcompute.Configure,
+	} {
+		t.Run(scope, func(t *testing.T) {
+			p := config.NewProvider(
+				[]byte(`{"format_version":"0.2","provider_schemas":{"registry.terraform.io/hashicorp/google":{"resource_schemas":{}}}}`),
+				"google", "github.com/upbound/provider-gcp/v3", []byte("name: gcp\nresources: {}\n"),
+			)
+			p.Resources["google_compute_reservation"] = &config.Resource{}
+			configure(p)
+			p.ConfigureResources()
+			hook := p.Resources["google_compute_reservation"].TerraformCustomDiff
+			for _, tc := range []struct {
+				name    string
+				count   *terraform.ResourceAttrDiff
+				destroy bool
+				keep    bool
+			}{
+				{name: "phantom", count: &terraform.ResourceAttrDiff{NewComputed: true}},
+				{name: "create", count: &terraform.ResourceAttrDiff{Old: "0", New: "1"}, keep: true},
+				{name: "remove", count: &terraform.ResourceAttrDiff{Old: "1", New: "0"}, keep: true},
+				{name: "unchanged_count", count: &terraform.ResourceAttrDiff{Old: "1", New: "1"}, keep: true},
+				{name: "destroy", count: &terraform.ResourceAttrDiff{NewComputed: true}, destroy: true, keep: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					other := &terraform.ResourceAttrDiff{Old: "1", New: "2"}
+					diff := &terraform.InstanceDiff{
+						Destroy: tc.destroy,
+						Attributes: map[string]*terraform.ResourceAttrDiff{
+							"share_settings.#":             tc.count,
+							"specific_reservation.0.count": other,
+						},
+					}
+					got, err := hook(diff, nil, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					count, present := got.Attributes["share_settings.#"]
+					if present != tc.keep || (tc.keep && count != tc.count) {
+						t.Errorf("sharing count diff: got present=%t value=%+v, want present=%t value=%+v", present, count, tc.keep, tc.count)
+					}
+					if got.Attributes["specific_reservation.0.count"] != other {
+						t.Error("unrelated count diff was changed")
+					}
+				})
+			}
+			if got, err := hook(nil, nil, nil); got != nil || err != nil {
+				t.Fatalf("nil diff: got %+v, %v; want nil, nil", got, err)
+			}
+		})
+	}
+}

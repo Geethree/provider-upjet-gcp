@@ -463,9 +463,12 @@ func Configure(p *config.Provider) { // nolint: gocyclo
 	p.AddResourceConfigurator("google_compute_reservation", func(r *config.Resource) {
 		r.MarkAsRequired("zone")
 		r.TerraformCustomDiff = func(diff *terraform.InstanceDiff, _ *terraform.InstanceState, _ *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
-			if diff != nil {
-				delete(diff.Attributes, "share_settings.#")
+			if diff == nil || diff.Destroy {
+				return diff, nil
 			}
+			// Preserve real block-count changes so the SDK can pass configured
+			// sharing to the create callback. Only suppress phantom empty diffs.
+			dropEmptyBlockCountDiffs(diff, "share_settings.#")
 			return diff, nil
 		}
 	})
